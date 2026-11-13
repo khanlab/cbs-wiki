@@ -1,333 +1,140 @@
-# Python Environment Best Practices on the CBS Cluster
+# CBS Python guide
 
-This guide describes **recommended practices for managing Python environments** on the CBS servers (VDI and SLURM cluster). The goal is reproducibility, performance, and keeping shared storage healthy.
+This guide describes how to manage Python environments on the CBS servers (VDI and SLURM). We recommend [Pixi](#Pixi-recommended) for new projects, and keeping your environments in your lab's datashare rather than in your home directory.
 
----
+## Where to keep environments
 
-## TL;DR (Strong Recommendations)
+- **Keep projects and environments in your lab's datashare**: `/nfs/<pi_last_name>` or `/cifs/<pi_last_name>`, depending on where your lab's data is. In the examples below, replace `<datashare>` with that path.
+- **If you run jobs on SLURM, the environment must be on `/nfs`**: the SLURM cluster cannot access `/cifs` datashares. If your lab only has a `/cifs` datashare, your PI can request a `/nfs` datashare (see [CBS storage guide](https://hackmd.io/@CompCore/cbs_storage)).
+- **Do not put large environments in your home directory.** It is limited to 20 GB, and your VDI and SLURM homes are separate, so an environment in your VDI home is not available on SLURM. See [Home directories](https://hackmd.io/@CompCore/cbs_storage#Home-directories).
 
-* **Use `pixi` for new projects** (recommended default).
-* Store **project environments outside your home directory** for medium/large projects.
-* Use **`/nfs/<lab>` for persistent environments and projects**.
-* Use **`/tmp` for temporary, node-local computations**.
-* Regularly **clean caches** to avoid bloating your home directory.
+## Pixi (recommended)
 
----
+[Pixi](https://pixi.sh/) manages one environment per project, using Conda and PyPI packages. It records the exact package versions in a lock file, so the environment can be reproduced on another machine or later in time.
 
-## Storage Overview (Important)
-
-| Location        | Purpose                      | Notes                                       |
-| --------------- | ---------------------------- | ------------------------------------------- |
-| `$HOME`         | Small configs, scripts       | Shared, quota-limited, fast for small files |
-| `/nfs/<lab>`    | Projects & environments      | Persistent, shared within lab (recommended) |
-| `/nfs/scratch`  | Temporary multi-node storage | Not permanent                               |
-| `/tmp` | Fast node-local I/O          | Deleted when job ends                       |
-
-⚠️ **Do not place large Python environments in `$HOME`**. This causes quota pressure and performance issues for everyone.
-
----
-
-## Module System (Lmod) – Important
-
-The cluster uses **Lmod** to manage software. Tools such as **Pixi** and **uv** are provided as modules.
-
-Before using Pixi or uv, you **must load the corresponding module**:
+Pixi is available as a module. Load it in every terminal session and every job script where you use it:
 
 ```bash
 module load pixi
 ```
 
-(If you see multiple versions, use `module avail pixi` and follow lab recommendations.)
-
-This applies both to **interactive sessions** and **SLURM jobs**.
-
----
-
-## Recommended Tool: Pixi (Default Choice)
-
-`pixi` is a modern, reproducible environment and project manager built on Conda packages. It is fast, lockfile-based, and well suited for scientific workflows.
-
-### Why Pixi?
-
-* Reproducible environments via `pixi.lock`
-* One environment **per project** (best practice)
-* Easy activation (including in SLURM)
-* Clean separation between projects
-
----
-
-### Creating a New Pixi Project
+### Create a project
 
 ```bash
-# Load Pixi via Lmod
-module load pixi
-```
-
-```bash
-# Move to your lab storage
-cd /nfs/<lab>/projects
-
-# Create a new project
+cd <datashare>/projects
 pixi init mri_analysis
 cd mri_analysis
+pixi add python=3.13 numpy scipy pandas nibabel nilearn
 ```
 
-This creates:
+This creates `pixi.toml` (the list of packages you asked for) and `pixi.lock` (the exact versions installed). To add a package that is only available on PyPI, use `pixi add --pypi <package>`.
 
-* `pixi.toml` – project configuration
-* `pixi.lock` – exact, reproducible package versions
+### Use the environment
 
----
-
-### Adding Packages
+From the project folder:
 
 ```bash
-# Add common scientific packages
-pixi add python=3.11 numpy scipy pandas nibabel nilearn
-
-# Add PyTorch or other heavy deps if needed
-pixi add pytorch torchvision -c pytorch
+pixi shell                     # start a shell inside the environment (exit with `exit`)
+pixi run python analysis.py    # or run a single command in the environment
 ```
 
----
+### Use it in a SLURM job
 
-### Activating the Environment (Interactive)
-
-Make sure the Pixi module is loaded:
-
-```bash
-module load pixi
-```
-
-```bash
-pixi shell
-```
-
-You are now inside the project environment.
-
----
-
-### Running Commands Without Activating a Shell
-
-Useful for scripts and SLURM jobs:
-
-```bash
-pixi run python analysis.py
-```
-
----
-
-## Using Pixi in a SLURM Script
-
-Always load the Pixi module inside your job script.
+`pixi run` works in job scripts without activating anything. The project must be on `/nfs`:
 
 ```bash
 #!/bin/bash
-#SBATCH --job-name=mri_analysis
 #SBATCH --time=02:00:00
-#SBATCH --mem=16G
 #SBATCH --cpus-per-task=4
+#SBATCH --mem=16G
 
-# Initialize module system (usually automatic, but safe to include)
-source /etc/profile
-
-# Load Pixi
 module load pixi
-
-cd /nfs/<lab>/projects/mri_analysis
-
-# Option A: run directly (recommended)
+cd /nfs/<pi_last_name>/projects/mri_analysis
 pixi run python analysis.py
-
-# Option B: activate shell (less common)
-# pixi shell
-# python analysis.py
 ```
 
-✅ No `source activate` required.
+### Pixi cache
 
----
-
-## Alternative Tools (If You Prefer)
-
-### Conda / Mamba
-
-Good option if you already have Conda-based workflows.
-
-#### Create Environment (Recommended Location)
+Pixi keeps downloaded packages in a cache, by default in your home directory. Projects do not need the cache to run, so it is always safe to clean:
 
 ```bash
-mamba create -p /nfs/<lab>/envs/mri_env python=3.11 numpy scipy nibabel
+pixi clean cache        # add --conda or --pypi to clean only one type, -y to skip the prompt
+pixi info               # "Cache dir" shows where the cache is
 ```
 
-#### Activate (Interactive)
+To keep the cache out of your 20 GB home, move it to your datashare by adding this line to your `~/.bashrc`:
 
 ```bash
-source activate /nfs/<lab>/envs/mri_env
+export PIXI_CACHE_DIR=<datashare>/pixi-cache
 ```
 
-#### SLURM Script Example
+Your VDI and SLURM homes are separate, so set this in the `~/.bashrc` of each system where you use Pixi (on SLURM, use a path on `/nfs`).
 
-```bash
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate /nfs/<lab>/envs/mri_env
-python analysis.py
-```
+## Other tools
 
----
+### uv
 
-### Python `venv`
-
-Best for **lightweight**, pure-Python environments.
-
-#### Create Environment
-
-```bash
-python -m venv /nfs/<lab>/envs/mri_venv
-```
-
-#### Activate
-
-```bash
-source /nfs/<lab>/envs/mri_venv/bin/activate
-pip install numpy scipy nibabel
-```
-
-⚠️ Not ideal for compiled neuroimaging packages.
-
----
-
-## UV (Optional, Advanced Users)
-
-`uv` is also provided via the **module system**:
+[uv](https://docs.astral.sh/uv/) is a fast, pip-compatible package and project manager for Python packages from PyPI. It does not install Conda packages. It is available as a module:
 
 ```bash
 module load uv
+cd <datashare>/projects
+uv init mri_analysis
+cd mri_analysis
+uv add numpy nibabel
+uv run python analysis.py
 ```
 
-`uv` is a **very fast pip-compatible tool** for dependency resolution.
+uv keeps its cache in `~/.cache/uv`; clean it with `uv cache clean`.
 
-* Excellent for pure-Python projects
-* Not Conda-based
-* Limited support for compiled neuroimaging stacks
+### Python `venv`
 
-Use only if you know your dependency constraints well.
-
-`uv` is a **very fast pip-compatible tool** for dependency resolution.
-
-* Excellent for pure-Python projects
-* Not Conda-based
-* Limited support for compiled neuroimaging stacks
-
-Use only if you know your dependency constraints well.
-
----
-
-## Tool Comparison Summary
-
-| Tool        | Best For                   | Pros                      | Cons                     |
-| ----------- | -------------------------- | ------------------------- | ------------------------ |
-| **Pixi**    | New projects (recommended) | Reproducible, clean, fast | Newer tool               |
-| Mamba/Conda | Heavy scientific stacks    | Mature ecosystem          | Can bloat home           |
-| venv        | Small projects             | Simple, standard          | Limited packages         |
-| uv          | Fast installs              | Very fast                 | Not ideal for MRI stacks |
-
----
-
-## Cache and Disk Usage Management (Very Important)
-
-### Where Python Stuff Accumulates
-
-* `~/.cache/`
-* `~/.conda/`
-* `~/.local/lib/pythonX.Y/`
-* `~/.pixi/`
-
-These can grow **very large** over time.
-
----
-
-### Cleaning Pixi Cache
+`python3 -m venv` creates an environment with the operating system's Python (on the VDI, Ubuntu 22.04's Python 3.10). This version is old and cannot be changed, so we recommend Pixi or uv instead. If you need a plain virtual environment with a newer Python, uv can create one:
 
 ```bash
-pixi cache prune
+module load uv
+uv venv --python 3.13 <datashare>/envs/mri_venv
+source <datashare>/envs/mri_venv/bin/activate
+uv pip install numpy scipy nibabel
 ```
 
-You may also remove the cache directory manually:
+### Conda / Mamba
+
+There is no Conda or Mamba module on the CBS servers. If you already have Conda-based workflows, install your own copy of [Miniforge](https://github.com/conda-forge/miniforge) (which uses the community `conda-forge` channel and includes `mamba`) in your datashare, not in your home directory.
 
 ```bash
-rm -rf ~/.pixi/cache
+mamba create -p <datashare>/envs/mri_env python=3.13 numpy scipy nibabel
+conda activate <datashare>/envs/mri_env
 ```
 
-✅ Safe: Pixi projects **do not depend** on the cache at runtime.
-
----
-
-### Cleaning Conda / Mamba
+In a SLURM job script (the installation and environment must be on `/nfs`):
 
 ```bash
-conda clean --all
+source /nfs/<pi_last_name>/miniforge3/etc/profile.d/conda.sh
+conda activate /nfs/<pi_last_name>/envs/mri_env
+python analysis.py
 ```
 
-Removes:
+## Cleaning up
 
-* Downloaded tarballs
-* Unused package caches
+Package caches in your home directory can grow large over time. Clean them regularly:
 
----
+| Tool | Command |
+|---|---|
+| Pixi | `pixi clean cache` |
+| uv | `uv cache clean` |
+| Conda / Mamba | `conda clean --all` |
+| pip | `pip cache purge` |
 
-### Cleaning pip Cache
-
-```bash
-pip cache purge
-```
-
----
-
-### About `~/.local/lib/pythonX.Y`
-
-This directory appears when:
-
-* `pip install --user` is used
-* No virtual environment was active
-
-⚠️ Packages here are **not isolated** and often cause conflicts.
-
-Safe cleanup (after checking):
+Avoid `pip install --user`: it installs packages into `~/.local/lib/python3.*`, outside any environment, where they often conflict with your environments. If that folder exists and you do not need it, you can delete it (check its contents first):
 
 ```bash
 rm -rf ~/.local/lib/python3.*
 ```
 
----
+See [Home directories](https://hackmd.io/@CompCore/cbs_storage#Home-directories) for how to check your home usage and other things to clean up.
 
-## Pixi Cache Location (Recommended)
+## Contact
+Need help? Contact: [support-cbs-server@uwo.ca](mailto:support-cbs-server@uwo.ca)
 
-### Setting `PIXI_CACHE_DIR`
-
-For large workflows, move the cache out of `$HOME`:
-
-```bash
-export PIXI_CACHE_DIR=/nfs/<lab>/pixi-cache
-```
-
-Add this to your shell init or a system profile script.
-
-### Does Pixi Require the Cache?
-
-* ❌ No, projects do **not** require cache contents to run
-* ✅ Cache is only for downloaded packages
-* Safe to delete anytime (Pixi will re-download)
-
-
-
-## Final Recommendations
-
-* One project = one environment
-* Prefer Pixi unless you have a strong reason not to
-* Keep `$HOME` clean
-* Use `/nfs/<lab>` for persistent work
-* Clean caches regularly
-
-If in doubt, ask your cluster admins before installing large environments.
-
+Back to the [CBS servers guide](https://hackmd.io/@CompCore/cbs_servers), the main page of the CBS wiki.
