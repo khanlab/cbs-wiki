@@ -1,424 +1,218 @@
 # CBS SLURM server guide
 
-This guide introduces how to use the CBS SLURM cluster for computational research. The cluster uses the Simple Linux Utility for Resource Management (SLURM) that allows multiple users to **share computing resources fairly and efficiently**. Work is submitted to SLURM in the form of **batch jobs** or **interactive sessions**, which are automatically scheduled and distributed to the compute nodes without interfering with other users.
+The CBS SLURM cluster is the CBS high-performance computing cluster for GPU and heavy computational workloads. Instead of running programs directly, you submit **jobs** to the SLURM scheduler, which runs them on the compute nodes when the requested resources (CPUs, memory, GPUs, time) are available.
 
+The cluster is available to **Power user accounts** only, and can only access **OneFS 2025 datashares** (`/nfs`). See [CBS servers guide](https://hackmd.io/@CompCore/cbs_servers) for accounts and fees. If you are new to SLURM, the Alliance's [What is a scheduler?](https://docs.alliancecan.ca/wiki/What_is_a_scheduler%3F) is a good introduction.
 
-The cluster includes **10 high-performance compute nodes** with varying CPU, memory, storage, and GPU configurations. These nodes are designed to support a wide range of compute-intensive and data-heavy research applications.
+## Cluster overview
 
-The CBS SLURM cluster consists of two partitions, **`hx`** and **`vx`**, which provide access to different node types optimized for high-performance and GPU-accelerated workloads:
+| Node type | Nodes | CPU model | CPU cores | RAM | Local scratch | GPUs per node | Partition |
+|---|---|---|---|---|---|---|---|
+| L40S GPU nodes | 7 | Intel Xeon Gold 6448Y | 128 | 500 GB | 7 TB | 2 × NVIDIA L40S | `hx` |
+| A100 GPU nodes | 3 | Intel Xeon Gold 6142 | 64 | 300 GB | 1 TB | 2 × NVIDIA A100 | `vx` |
 
-| Node Type      | Nodes | CPU Model                      | CPU Cores | RAM     | Local tmp storage | GPUs per Node  | Partition |
-| -------------- | ----- | ------------------------------ | --------- | ------- | ------------- | --------------- |  ----------- |
-| L40 GPU Nodes  | 7     | Intel Xeon Gold 6448Y          | 128       | 500+ GB | 7 TB          | 2 × NVIDIA L40  |  hx           |
-| A100 GPU Nodes | 3     | Intel Xeon Gold 6142           | 64        | 300 GB  | 1 TB          | 2 × NVIDIA A100 |  vx           |
+### Partitions
 
-> [!Note]
-> Only `vx` nodes and the login node have internet access.
+- **`hx`**: newer CPUs, more cores, RAM, and local scratch per node, and NVIDIA L40S GPUs. Best for large CPU and GPU workloads and data-heavy pipelines.
+- **`vx`**: NVIDIA A100 GPUs. Best for GPU workloads that benefit from the A100.
+- **`all`** (default): both `hx` and `vx` nodes. If you do not set `--partition`, your job can run on either node type, so different runs may use different hardware. If hardware consistency matters for your results, set `--partition` explicitly.
 
-This guide explains how to:
-- Connect to the cluster and understand SLURM.
-- Request CPU, GPU, and memory resources.
-- Store and manage data across `/nfs/<pi_last_name>`, `/localscratch`, and `/nfs/scratch`.
-- Submit batch and interactive jobs.
-- Use modules to manage software.
+### Limits
 
-If you are already familiar with SLURM servers you can go directly to the [SLURM CBS server Notes and Best Practices](#SLURM-CBS-server-Notes-and-Best-Practices) section.
+| | Limit |
+|---|---|
+| Maximum job time | **48 hours** (all partitions) |
+| Interactive sessions | **5 hours** |
+| Home directory | **20 GB**, separate from your VDI home |
+| `/nfs/scratch` | 25 TB shared; files older than **30 days** are deleted |
+| `/localscratch` | About 7 TB (`hx`) or 1 TB (`vx`) per node; deleted when the job ends |
+| Login node | CPU and memory per user are capped |
+| Internet access | Available on the login node and all compute nodes |
 
-## 1.What is SLURM and a Job Scheduler?
+## Using the CBS SLURM cluster
 
+### Connecting
 
-- **SLURM** (Simple Linux Utility for Resource Management) is a **job scheduler**.  
-- A job scheduler manages **when, where, and how jobs run** on a shared computing cluster.  
-- Instead of running programs directly, you **submit jobs to SLURM**, which allocates resources (CPU, memory, GPU, time) and executes your workload on the compute nodes.  
-
-This ensures **fairness**, **efficiency**, and **stability** in a multi-user research environment.
-
-
-## 2. Connecting to the Cluster
-
-To log in to the **login node**:
+Connect to the login node with SSH:
 
 ```bash
-ssh your_uwo_username@rri-cbs-slurm
+ssh <westernid>@rri-cbs-slurm
 ```
-__Note__: An automatic setup script runs every hour to configure new users. If this is your first time connecting to the SLURM server, please:
-- Connect and disconnect once.
-- Wait one hour.
-- Then reconnect.
+
+You can connect from the CBS VDI servers or from the UWO network. From off campus, connect through the [CBS VDI servers](https://hackmd.io/@CompCore/cbs_vdi).
+
+> [!Note] First connection
+> New users are configured by a setup script that runs every hour. The first time you use the cluster, connect and disconnect once, wait one hour, then connect again.
+
+#### The login node
+
+The login node is a small virtual machine shared by all users. Use it only for:
+
+- Editing files and scripts
+- Managing and transferring data
+- Submitting and monitoring jobs
+- Light setup tasks, such as compiling small programs
 
 > [!Caution]
-> **NEVER** run computations directly on the **login node**.  
-> The login node is only for **submitting jobs, file management, and light setup**.  All computational work should be submitted via SLURM.
+> Do not run computations on the login node, including large software builds, data processing, or installing large Python environments. Submit them as jobs or run them in an [interactive session](#Interactive-jobs). CPU and memory on the login node are capped per user, so heavy work there will run slowly or fail.
 
-> [!Important]
-> - Direct ssh access is only possible through the CBS VDI servers or when you are connected to the UWO network.
-> - For access off-campus you should connect through the CBS VDI servers.
+### Storage for jobs
 
-> [!Tip]
-> You can use `-X` to enable **X11 forwarding** if you require GUI applications in interactive sessions (see [section 9](#9.-Interactive-Jobs-(with-X11-Forwarding))).
----
+| Location | Use it for | Notes |
+|---|---|---|
+| `/nfs/<pi_last_name>` | Your lab's data, projects, and environments | OneFS 2025 lab datashare. Legacy `/cifs` datashares are **not** available on the cluster. |
+| `/nfs/scratch` | Staging data before and after jobs, especially if your lab has no `/nfs` datashare yet | Shared by all users; files older than 30 days are deleted |
+| `/localscratch` | Running your job | Fast local disk, private to each job, **deleted when the job ends**. `/tmp` points here. |
+| Home (`~`) | Scripts and small configuration files | 20 GB; not for data |
 
-## 3. Submitting a Job
+Reading and writing large amounts of data directly on `/nfs` during a job is slow and affects other users. The recommended workflow is:
 
-Jobs are submitted using:
+1. Copy the input data from `/nfs/<pi_last_name>` (or `/nfs/scratch`) to `/localscratch`.
+2. Run the computation in `/localscratch`.
+3. Copy the results back to `/nfs/<pi_last_name>` (or `/nfs/scratch`) **before the job ends**.
 
-```bash
-sbatch my_job_script.sh
-```
+See the [CBS storage guide](https://hackmd.io/@CompCore/cbs_storage) for datashares, home directories, and how to request a lab datashare on `/nfs`.
 
-Where `my_job_script.sh` is a shell script that describes:
-1. The resources you need (CPUs, memory, GPUs, runtime).  
-2. The commands to run.  
+### Writing a job script
 
+A job script is a shell script with `#SBATCH` lines that tell SLURM what resources you need:
 
+| Option | What it sets | Example |
+|---|---|---|
+| `--time` | Maximum run time (**required**, up to 48 h) | `#SBATCH --time=12:00:00` |
+| `--cpus-per-task` | Number of CPU cores (**required**) | `#SBATCH --cpus-per-task=4` |
+| `--mem` | Memory per node (**required**) | `#SBATCH --mem=16G` |
+| `--gpus-per-node` | Number of GPUs (GPU jobs only) | `#SBATCH --gpus-per-node=1` |
+| `--partition` | `hx`, `vx`, or `all` (default) | `#SBATCH --partition=hx` |
+| `--job-name` | Name shown in the queue | `#SBATCH --job-name=myjob` |
+| `--output` / `--error` | Log files (`%j` is replaced by the job ID) | `#SBATCH --output=slurm-%j.out` |
 
-See [section 7](#7.-Job-Script-Template) for an example template of a job script.
-
-> [!TIP] Best practice
-> Jobs have a maximum runtime of **48 hours**. If your workflow is longer, design your code with checkpoints so you can restart from intermediate results.
-
-## 4.  SLURM Flags for Resource Requests
-
-Add these to your job script as `#SBATCH` directives:
-
-| Flag              | Purpose                                       | Example                           | Requirement          |
-| ----------------- | --------------------------------------------- | --------------------------------- | -------------------- |
-| `--time`          | maximum runtime (required for all jobs)       | `#SBATCH --time=12:00:00`         | must                 |
-| `--cpus-per-task` | number of CPU cores per task                  | `#SBATCH --cpus-per-task=4`       | must                 |
-| `--mem`           | memory required per node                      | `#SBATCH --mem=16G`               | must (if applicable) |
-| `--gpus-per-node` | number of GPUs required                       | `#SBATCH --gpus-per-node=1`       | must (if GPU job)    |
-| `--partition`     | select compute partition (`hx` or `vx`)       | `#SBATCH --partition=hx`          | should               |
-| `--ntasks`        | number of tasks (useful for parallel jobs)    | `#SBATCH --ntasks=1`              | optional             |
-| `--job-name`      | job name for tracking                         | `#SBATCH --job-name=myjob`        | optional             |
-| `--output`        | save standard output log                      | `#SBATCH --output=slurm-%j.out`   | optional             |
-| `--error`         | separate stderr log file                      | `#SBATCH --error=slurm-%j.err`    | optional             |
-
-See “Cluster partitions” section for guidance on when to use hx vs vx.
-
-
-## 5. Managing Software with **Modules**
-
-The cluster uses **modules** (Lmod) to manage software environments.
-
-- See available software:
-  ```bash
-  module avail
-  ```
-
-- Load a module:
-  ```bash
-  module load freesurfer/7.4.1
-  ```
-
-- Check loaded modules:
-  ```bash
-  module list
-  ```
-
-- Remove a module:
-  ```bash
-  module unload freesurfer/7.4.1
-  ```
-
-Load modules in your script or interactive session to have access to the software (See example in [section 7](#7.-Job-Script-Template)). For reproducibility, always specify exact module versions (e.g., freesurfer/7.4.1) and avoid relying on defaults.
-
-
-## 6. Data Storage: `/nfs/<pi_last_name>`, `/nfs/scratch`, and `/localscratch`
-
-> [!Caution] Home folder
-> - Do not save data in your home folder. 
-> - Home folder is meant to be used for scripts or small python environments. 
-> - Data or large python environments should be saved in a persistent lab share.
-
-### 🔒 Lab Shares: `/nfs/<pi_last_name>`
-
-- Labs can request a **dedicated fileshare** for storing and processing project data:
-  ```
-  /nfs/<pi_last_name>
-  ```
-- These shares are provisioned on the **2025 OneFS fileserver** and are accessible from all **compute nodes**.
-- **Note:** Older lab shares mounted via `/cifs/...` from the legacy **2018 fileserver** are **not accessible from the compute nodes**. All compute jobs should use the new `/nfs/<pi_last_name>` shares or `/nfs/scratch`.
-
-> 💡 For details on the CBS servers storage, see the [CBS Server Storage Document](https://hackmd.io/@CompCore/cbs_storage).
-
-
-
-### 📂 Shared Temporary Space: `/nfs/scratch`
-
-- `/nfs/scratch` is a **shared, high-capacity (25 TB) space** accessible to all users on the compute nodes.
-- Use it to **stage input/output data** before and after job runs — especially if your lab doesn’t yet have a `/nfs/<pi_last_name>` share.
-
-> [!Caution] Scratch Policy
-> - Files older than **30 days** are **automatically deleted**.  
-> - This storage is **not backed up** and is intended **only for temporary use**.
-
-
-### ⚡ Fast Local Storage: `/localscratch` on Compute Nodes
-
-- Each compute node has a **7TB fast SSD** local disk.
-- When your job starts, a **personal `/localscratch` folder** is automatically created **just for that job**.
-- This folder is:
-  - **Private to your job**
-  - **Faster than network storage** (/nfs/...)
-  - **Deleted at job completion/termination** (all contents are wiped)
-
-> [!Tip] Best practice
->  Copy your data to `/localscratch`, run your job there, and move outputs back to `/nfs/<pi_last_name>` or `/nfs/scratch` **before the job finishes**.
-
-Note: `/tmp` is mapped to `/localscratch` on compute nodes.
-
-### 💬 Requesting Storage
-
-- Contact [support-cbs-server@uwo.ca](mailto:support-cbs-server@uwo.ca) to request a **new lab share** on `/nfs/<pi_last_name>`.
-- For billing and quota details, refer to the [CBS Servers Document](https://hackmd.io/@CompCore/cbs_servers) or email: support-cbs-server@uwo.ca
-
-
-## 7. Job Script Template
-
-📋 **Example Workflow**
-
-A typical script might:
-1. **Copy data** from `/nfs/<pi_last_name>` or `/nfs/scratch` to `/localscratch`.
-2. **Process data** using data in `/localscratch` and write logs locally.
-3. **Checkpoint** outputs periodically (e.g., after each step in a pipeline) to `/nfs/scratch`. (Optional but recommended).
-4. **Copy final results** from `/localscratch` to `/nfs/<pi_last_name>` or `/nfs/scratch` before the job exits.
-
-Example: `my_job_script.sh`
+Example: run FreeSurfer `recon-all` on one subject, using `/localscratch` as described in [Storage for jobs](#Storage-for-jobs):
 
 ```bash
 #!/bin/bash
-#SBATCH --job-name=myanalysis
-#SBATCH --time=12:00:00
+#SBATCH --job-name=recon-all_sub-01
+#SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --output=slurm-%j.out
 
-# Optional: select partition (hx or vx). Default is all
-# #SBATCH --partition=hx
+SUBJECT=sub-01
+INPUT=/nfs/<pi_last_name>/myproject/rawdata/${SUBJECT}/anat/${SUBJECT}_T1w.nii.gz
+OUTPUT=/nfs/<pi_last_name>/myproject/derivatives/freesurfer
 
-# Load software
-module load software/1.0
+module load freesurfer/8.2.0
 
-# Copy input data to local scratch (/localscratch)
-rsync -av /nfs/lab/myproject/data/input.csv /localscratch
+# 1. Copy the input to the job's local scratch folder
+export SUBJECTS_DIR=/localscratch/freesurfer
+mkdir -p "$SUBJECTS_DIR"
+cp "$INPUT" /localscratch/
 
-# Run computation
-software_command /localscratch/input.csv > /localscratch/results.txt
+# 2. Run the computation in /localscratch
+recon-all -s "$SUBJECT" -i "/localscratch/${SUBJECT}_T1w.nii.gz" -all -threads "$SLURM_CPUS_PER_TASK"
 
-# Copy results back to lab share
-rsync -av /localscratch/results.txt /nfs/lab/myproject
+# 3. Copy the results back to the lab datashare before the job ends
+mkdir -p "$OUTPUT"
+rsync -a "$SUBJECTS_DIR/$SUBJECT" "$OUTPUT/"
 ```
 
-Submit it with:
+> [!Tip] Jobs longer than 48 hours
+> If your workflow needs more than 48 hours, split it into steps or add checkpoints, so that a new job can continue from the saved intermediate results.
+
+### Submitting and monitoring jobs
+
+| Task | Command |
+|---|---|
+| Submit a job | `sbatch my_job_script.sh` |
+| List your jobs | `squeue -u $USER` |
+| Cancel a job | `scancel <jobID>` |
+| Show your job history | `sacct -u $USER` |
+| Show details of a job | `scontrol show job <jobID>` |
+| Show nodes and their state | `sinfo` |
+| Check how efficiently finished jobs used their resources | `reportseff <jobID>` (see [Using resources efficiently](#Using-resources-efficiently)) |
+
+### Interactive jobs
+
+For debugging or setup, you can request an interactive session on a compute node. When the resources are allocated, you get a shell on the node:
+
 ```bash
-sbatch my_job_script.sh
+salloc --time=05:00:00 --cpus-per-task=2 --mem=4G                      # CPU only
+salloc --time=05:00:00 --cpus-per-task=2 --mem=4G --gpus-per-node=1    # with a GPU
+salloc --time=05:00:00 --cpus-per-task=2 --mem=4G --partition=vx       # on a specific partition
 ```
 
-## 8. Monitoring and Managing Jobs
+Interactive sessions are limited to **5 hours**.
 
-- List your jobs:
+#### Graphical applications (X11)
+
+To run graphical applications, connect with X11 forwarding and add `--x11` to `salloc`:
+
+```bash
+ssh -X <westernid>@rri-cbs-slurm
+salloc --time=05:00:00 --cpus-per-task=2 --mem=8G --x11
+```
+
+However, for visualization and other graphical work, we recommend using the [CBS VDI](https://hackmd.io/@CompCore/cbs_vdi) for a better experience.
+
+### Software
+
+The cluster uses modules (Lmod) for software. Load the modules you need inside your job script, always with a version:
+
+```bash
+module load freesurfer/8.2.0
+```
+
+See the [CBS software guide](https://hackmd.io/@CompCore/cbs_software) for module commands, containers, and how to request new software.
+
+Notes:
+
+- The cluster has the same modules and versions as the CBS VDI.
+- Apptainer is loaded by default. Shared container images are in `/srv/containers`.
+- For recommended Python practices, see the [Python guide](https://hackmd.io/@CompCore/python_cbs).
+- The `kslurm` module is a wrapper with simpler commands for submitting jobs (`kbatch`) and starting interactive sessions (`krun`); load it with `module load kslurm`. See the [kslurm documentation](https://kslurm.readthedocs.io/en/latest/) for details. For example:
   ```bash
-  squeue -u <your_uwo_username>
-  ```
-- Cancel a job:
-  ```bash
-  scancel <jobID>
-  ```
-- Show job history:
-  ```bash
-  sacct -u <your_uwo_username>
-  ```
-- Detailed info on a running or completed job:
-  ```bash 
-  scontrol show job <jobID>
-  ```
-- List nodes on the cluster, what is up and down:
-  ```bash 
-  sinfo
+  kbatch 12:00 16 24G recon-all <recon-all-args>   # 12-hour job, 16 cores, 24 GB
+  krun 4 3:00 15G gpu                               # interactive: 4 cores, 3 hours, 15 GB, 1 GPU
   ```
 
-## 9. Interactive Jobs
+### Using resources efficiently
 
-Sometimes you need an **interactive session** (e.g., for debugging or set-up).
+#### Request realistic resources
 
-> [!Caution] 
-> Interactive sessions are limited to **5 hours**.
-
-- Request an interactive session:
-    ```bash
-    salloc --time=05:00:00  --cpus-per-task=2 --mem=4G
-    ```
-- With GPUs:
-    ```bash
-    salloc --time=05:00:00 --cpus-per-task=2 --mem=4G --gpus-per-node=1
-    ```
-- Selecting a partition (default is 'all')
-```bash
-salloc --partition=vx --time=05:00:00 --cpus-per-task=2 --mem=4G
-```
-
-Once allocated, you will be placed inside a shell on a compute node where you can run commands interactively.
-
-### GUI (X fowarding)
-In case you need GUI or windows you need to start your interactive session with X fowarding enabled (using --x11 flag). The above example would become:
+Request only the resources your job needs. Over-requesting CPUs, memory, GPUs, or time increases your queue time and keeps resources idle that other users could be using. The best way to size your requests is to check what your previous jobs actually used. You can do this with `reportseff`:
 
 ```bash
-salloc --time=05:00:00  --cpus-per-task=2 --mem=8G --x11 
-```
-Make sure you connect to the SLURM cluster with X forwarding enabled:
-```bash
-ssh -X your_uwo_username@rri-cbs-slurm.fmd.uwo.pri
-```
+module load reportseff
 
-
-# SLURM CBS server Notes and Best Practices
-
-### Cluster partitions
-The cluster provides two partitions (`hx` and `vx`) that corresponds to different hardware environments. If no partition is specified, SLURM will assign the job to default 'all' partition that include both `hx` and `vx` partitions. This may result in different hardware being used across runs. If hardware consistency is relevant for your job, explicitly setting --partition is strongly recommended to ensure reproducibility and correct hardware selection.
-
-The table at the beginning of this document provide hardware partitions details, but the key differences are:
-#### `hx` partition:
-- Newer **Intel Xeon Gold 6448Y** CPUs
-- NVIDIA L40 GPU
-- More CPU cores and RAM per node
-- Larger local SSD storage for localscratch
-- **No internet access** 
-- Best for large-scale CPU + GPU workloads and data-heavy pipelines
-        
-#### `vx` partition:
-- **Intel Xeon Gold 6142** CPUs 
-- NVIDIA A100 GPUs 
-- **Has internet access**  
-- Best for: 
-    - Environment setup (pip/conda installs, container pulls)  
-    - GPU workloads optimized for A100   
-    - Workflows requiring external downloads
-
-
-### Internet access and initial setup
-
-Compute jobs should **not require internet access**. Only the **`vx` partition nodes** and the login node have internet connectivity.
-
-It is good practice to prepare your working environment beforehand (e.g., downloading datasets, building containers, or creating Python environments) so that jobs can run without external dependencies.
-
-If a setup step requires both **internet access and compute resources**, it should be run in an interactive SLURM session on the **`vx` partition**, rather than on the login node, which is a small virtual machine not intended for workloads.
-
-You can request an interactive session using `salloc` and explicitly selecting the `vx` partition:
-
-```bash
-salloc --time=05:00:00 --cpus-per-task=2 --mem=8G --partition=vx
+reportseff <jobID>                          # one job (for an array job, all its tasks)
+reportseff -u $USER                         # all your jobs from the last week
+reportseff -u $USER --since d=1             # your jobs from the last day
 ```
 
-This ensures you are placed on a node with:
+Running `reportseff` with no arguments in a folder of SLURM output files (`slurm-<jobID>.out`) reports on those jobs.
 
-* internet access (required for installations and downloads)
-* appropriate compute resources for setup tasks
+| Column | Meaning | What to do |
+|---|---|---|
+| **CPUEff** | Share of the requested CPU time actually used | If it is low (e.g. below 50%), request fewer `--cpus-per-task`, or check that your program is set up to use multiple threads. |
+| **MemEff** | Peak memory used, as a share of the memory requested | If it is low, lower `--mem` (keep a margin of about 20%). If it is near 100% or the job ran out of memory, increase it. |
+| **TimeEff** | Elapsed time, as a share of the time limit | If it is low, lower `--time`. Jobs with shorter time limits can often start sooner. |
 
+#### Prepare your environment in advance
 
-
-### **Avoid running heavy jobs on the login node**
-
-The login node is intended for editing files, compiling code, and submitting jobs. Do not run computationally intensive workloads directly on the login node. Always submit jobs through SLURM.
-
-### Use the `/localscratch` folder for computation
-
-Reading and writing large amounts of data directly to the NFS filesystem during job execution can generate heavy network traffic and degrade performance for other users. Instead, **perform computations locally on the compute node using the `/localscratch` directory**, as described in the *Data Storage* section. Local disk access is typically much faster than NFS.
-
-A common workflow is to copy input data to `/localscratch` at the start of the job, run all computations there, and copy the results back to `/nfs/<pi_last_name>` or `/nfs/scratch` before the job finishes. The `/localscratch` directory is automatically cleared after the job ends, so ensure all required outputs are copied before termination.
-
-### Request realistic resources
-Request only the resources required by your job. Over-requesting CPUs or memory can increase queue time and reduce cluster efficiency.
-
-After a job finishes, you can check how many resources it actually used:
-
-```bash
-sacct -j <jobID> --format=JobID,Elapsed,MaxRSS,AllocCPUS
-```
-- Elapsed → total runtime
-- MaxRSS → peak memory usage
-- AllocCPUS → CPUs requested
-
-(ToDo: Give users options/ideas in how to monitor their jobs used resources.)
-
-
-
-
-### GUI and graphical interfaces
-
-Although SLURM supports GUI applications through **X forwarding**, we recommend using the **CBS VDI** for visualization tasks or graphical applications. The VDI environment is generally more stable and provides a better user experience for GUI workflows.
-
-
-### Containers
-
-The CBS SLURM cluster uses **Apptainer** (formerly **Singularity**) for containerized workflows. Apptainer is available through the module system.
-
-Commonly used containers are stored in:
-
-```
-/srv/containers
-```
-
-You are encouraged to reuse these images when possible to avoid unnecessary downloads. If a container is outdated or a commonly used tool is missing, please contact the administrators so it can be added for the community.
-
-
-### Python
-
-For recommended Python practices on the cluster, see the **Python guide**:
-
-[https://hackmd.io/@CompCore/python_cbs](https://hackmd.io/@CompCore/python_cbs)
-*(Work in progress)*
-
-### kslurm (Simplified SLURM Wrapper)
-
-**kslurm** is a wrapper that simplifies SLURM commands.
-
-It provides two main commands:
-
-* **kbatch** — submit batch jobs (non-interactive)
-* **krun** — request interactive sessions
-
-These commands use simplified argument syntax, allowing you to request resources without writing a full SLURM script or specifying multiple `--options`.
-
-Examples:
-
-Schedule a **12-hour job** with **16 cores** and **24 GB of memory**:
-
-```bash
-kbatch 12:00 16 24G recon-all <recon-all-args>
-```
-
-Request an **interactive session** with **4 cores**, **3 hours**, **15 GB of memory**, and **a GPU**:
-
-```bash
-krun 4 3:00 15G gpu
-```
-
-`kslurm` will be available as a module *(TODO)*.
-See the full documentation for details:
-
-[https://kslurm.readthedocs.io/en/latest/](https://kslurm.readthedocs.io/en/latest/)
-
-
-
-
-# General information
-
-## Billing Rates
-
-CBS SLURM server is only available to Power users. Note that CBS SLURM only support the OneFS Storage datashare (/nfs). For further details and fees please check the [CBS servers](https://hackmd.io/@CompCore/cbs_servers) wiki entry.
-
+Although all nodes have internet access, prepare your working environment before running jobs (download datasets, build containers, create Python environments) instead of downloading at the start of every job. Jobs then start faster, are more reproducible, and do not fail when an external site is slow or unavailable. If a setup step needs substantial resources, run it in an [interactive session](#Interactive-jobs) rather than on the login node.
 
 ## Additional resources
 
-For detailed explanations and further reading we highly recommend Canada Alliance documentation on SLURM. 
+The Digital Research Alliance of Canada documentation has detailed explanations of SLURM:
 
-https://docs.alliancecan.ca/wiki/What_is_a_scheduler
+- [What is a scheduler?](https://docs.alliancecan.ca/wiki/What_is_a_scheduler%3F)
+- [Running jobs](https://docs.alliancecan.ca/wiki/Running_jobs)
+- [Using GPUs with SLURM](https://docs.alliancecan.ca/wiki/Using_GPUs_with_Slurm)
+- [MATLAB](https://docs.alliancecan.ca/wiki/MATLAB)
 
-https://docs.alliancecan.ca/wiki/Running_jobs
+Some details (partitions, limits, storage paths) differ on the CBS cluster; when in doubt, this guide applies.
 
-https://docs.alliancecan.ca/wiki/Using_GPUs_with_Slurm
+## Contact
+Need help? Contact: [support-cbs-server@uwo.ca](mailto:support-cbs-server@uwo.ca)
 
-https://docs.alliancecan.ca/wiki/MATLAB
-
-# Need help?
-📧 Contact: support-cbs-server@uwo.ca
+Back to the [CBS servers guide](https://hackmd.io/@CompCore/cbs_servers), the main page of the CBS wiki.
